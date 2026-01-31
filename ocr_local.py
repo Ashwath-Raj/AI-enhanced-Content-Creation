@@ -5,9 +5,11 @@ Unified document ingestion + OCR service.
 
 WHAT THIS FILE DOES:
 - Accepts MANY reasonable file types (image, pdf, text, zip)
+- Supports drag-and-drop, multiple files, and folders
 - Normalizes everything into ONE JSON output format
 - Runs OCR only when needed
 - Emits Gemini-aware metadata so LLMs don't hallucinate
+- Preserves original file metadata (name, size, path, etc.)
 - Designed to be wrapped by FastAPI later
 
 SUPPORTED INPUTS:
@@ -30,33 +32,40 @@ import numpy as np
 from pdf2image import convert_from_path
 import tempfile
 import zipfile
+from datetime import datetime
 
 
-# -----------------------------
+# ============================================================
 # FILE TYPE DEFINITIONS
-# -----------------------------
+# ============================================================
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
-TEXT_EXTS = {".txt", ".md", ".csv", ".json"}
-OFFICE_EXTS = {".docx", ".pptx"}  # converted to PDF later
+TEXT_EXTS  = {".txt", ".md", ".csv", ".json"}
+OFFICE_EXTS = {".docx", ".pptx"}  # conversion stub only
 
 
-# -----------------------------
+# ============================================================
 # IMAGE PREPROCESSING
-# -----------------------------
+# ============================================================
 def preprocess_image(image_path):
     """
     Prepares an image for OCR.
-    This removes color noise and improves text clarity.
+    - Removes color noise
+    - Upscales small text
+    - Applies binary thresholding
+
+    NOTE:
+    This function does NOT attempt to "improve meaning".
+    It only improves OCR readability.
     """
 
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError("Unable to read image")
 
-    # Convert to grayscale (OCR does not need color)
+    # Convert to grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Upscale to help small fonts
+    # Upscale to help OCR with small fonts
     gray = cv2.resize(
         gray,
         None,
@@ -67,22 +76,23 @@ def preprocess_image(image_path):
 
     # Convert to clean black & white
     _, thresh = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        gray, 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
     return thresh
 
 
-# -----------------------------
-# QUALITY + GEMINI SIGNALS
-# -----------------------------
+# ============================================================
+# QUALITY ASSESSMENT + GEMINI SIGNALS
+# ============================================================
 def assess_quality(text, path, page_count=1):
     """
-    Computes OCR confidence + emits metadata for Gemini.
+    Estimates OCR quality and produces Gemini-facing metadata.
 
-    IMPORTANT:
-    This function does NOT "fix" text.
-    It only tells downstream AI how careful to be.
+    IMPORTANT PHILOSOPHY:
+    - OCR never "fixes" text
+    - This function only tells downstream AI HOW CAREFUL TO BE
     """
 
     warnings = []
@@ -94,7 +104,7 @@ def assess_quality(text, path, page_count=1):
         warnings.append("short_text")
         confidence -= 0.3
 
-    # Measure noise (symbols vs letters)
+    # Noise detection: symbols vs letters
     non_alpha_ratio = sum(
         1 for c in text if not c.isalnum() and not c.isspace()
     ) / max(text_len, 1)
@@ -103,7 +113,7 @@ def assess_quality(text, path, page_count=1):
         warnings.append("low_confidence_text")
         confidence -= 0.4
 
-    # Resolution check (only works for images)
+    # Resolution check (images only)
     try:
         img = Image.open(path)
         w, h = img.size
@@ -111,12 +121,12 @@ def assess_quality(text, path, page_count=1):
             warnings.append("low_resolution")
             confidence -= 0.2
     except:
-        # PDFs and text files land here
+        # PDFs / text files land here
         pass
 
     confidence = max(round(confidence, 2), 0.0)
 
-    # ---- Gemini-facing interpretation ----
+    # Gemini behavior control
     if confidence > 0.8:
         noise_level = "low"
         llm_mode = "creative"
@@ -148,37 +158,25 @@ def assess_quality(text, path, page_count=1):
     return confidence, warnings, ocr_meta
 
 
-# -----------------------------
-# IMAGE OCR
-# -----------------------------
-def run_image_ocr(image_path):
-    """
-    Runs OCR on a single image file.
-    """
-
-    processed = preprocess_image(image_path)
+# ============================================================
+# OCR HANDLERS
+# ============================================================
+def run_image_ocr(path):
+    processed = preprocess_image(path)
     text = pytesseract.image_to_string(processed).strip()
 
     if not text:
         return empty_result("image")
 
-    confidence, warnings, ocr_meta = assess_quality(text, image_path, page_count=1)
+    conf, warn, meta = assess_quality(text, path, 1)
+    return build_result(text, conf, warn, meta)
 
-    return build_result(text, confidence, warnings, ocr_meta)
 
-
-# -----------------------------
-# PDF OCR
-# -----------------------------
-def run_pdf_ocr(pdf_path):
-    """
-    Converts PDF pages to images, then OCRs each page.
-    """
-
+def run_pdf_ocr(path):
     all_text = []
     warnings = []
 
-    pages = convert_from_path(pdf_path, dpi=300)
+    pages = convert_from_path(path, dpi=300)
     page_count = len(pages)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -199,27 +197,16 @@ def run_pdf_ocr(pdf_path):
     if not full_text:
         return empty_result("pdf", page_count)
 
-    confidence, quality_warnings, ocr_meta = assess_quality(
-        full_text, pdf_path, page_count
-    )
-
+    conf, warn2, meta = assess_quality(full_text, path, page_count)
     return build_result(
         full_text,
-        confidence,
-        list(set(warnings + quality_warnings)),
-        ocr_meta
+        conf,
+        list(set(warnings + warn2)),
+        meta
     )
 
 
-# -----------------------------
-# TEXT PASSTHROUGH (NO OCR)
-# -----------------------------
 def run_text_passthrough(path):
-    """
-    Used for .txt, .md, .csv, .json files.
-    No OCR needed, just read text.
-    """
-
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read().strip()
 
@@ -227,7 +214,7 @@ def run_text_passthrough(path):
         return empty_result("text")
 
     return {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "text": text,
         "overall_confidence": 1.0,
         "warnings": [],
@@ -242,31 +229,26 @@ def run_text_passthrough(path):
     }
 
 
-# -----------------------------
+# ============================================================
 # OFFICE → PDF (STUB)
-# -----------------------------
+# ============================================================
 def convert_office_to_pdf(path):
     """
     DOCX / PPTX → PDF conversion.
-    Intentionally left as a stub.
 
-    In deployment, use:
-    libreoffice --headless --convert-to pdf <file>
+    Left intentionally unimplemented.
+    In production:
+        libreoffice --headless --convert-to pdf <file>
     """
     raise NotImplementedError(
-        "Office to PDF conversion requires LibreOffice in server environment."
+        "Office conversion requires LibreOffice in server environment."
     )
 
 
-# -----------------------------
+# ============================================================
 # ZIP HANDLING
-# -----------------------------
+# ============================================================
 def run_zip(path):
-    """
-    Extracts ZIP and processes each supported file inside.
-    Returns a list of OCR results.
-    """
-
     results = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -280,56 +262,71 @@ def run_zip(path):
                     results.append(dispatch_file(fpath))
                 except Exception as e:
                     results.append({
-                        "file": file,
+                        "file_meta": {
+                            "file_name": file
+                        },
                         "error": str(e)
                     })
 
     return results
 
 
-# -----------------------------
+# ============================================================
 # DISPATCHER (THE BRAIN)
-# -----------------------------
+# ============================================================
 def dispatch_file(path):
-    """
-    Decides how to process a file based on extension.
-    """
-
     ext = os.path.splitext(path)[1].lower()
 
     if ext in IMAGE_EXTS:
-        return run_image_ocr(path)
+        return attach_metadata(path, run_image_ocr(path))
 
     if ext == ".pdf":
-        return run_pdf_ocr(path)
+        return attach_metadata(path, run_pdf_ocr(path))
 
     if ext in TEXT_EXTS:
-        return run_text_passthrough(path)
+        return attach_metadata(path, run_text_passthrough(path))
 
     if ext in OFFICE_EXTS:
         pdf_path = convert_office_to_pdf(path)
-        return run_pdf_ocr(pdf_path)
+        return attach_metadata(path, run_pdf_ocr(pdf_path))
 
     if ext == ".zip":
-        return run_zip(path)
+        return attach_metadata(path, run_zip(path))
 
     raise ValueError(f"Unsupported file type: {ext}")
 
 
-# -----------------------------
-# HELPERS
-# -----------------------------
-def empty_result(input_type, page_count=1):
+# ============================================================
+# METADATA + RESULT HELPERS
+# ============================================================
+def attach_metadata(path, result):
     """
-    Standard empty output.
+    Attaches file-level metadata WITHOUT touching OCR content.
     """
 
-    return {
-        "schema_version": "1.2",
-        "text": "",
-        "overall_confidence": 0.0,
-        "warnings": ["no_text_detected"],
-        "ocr_meta": {
+    meta = {
+        "file_name": os.path.basename(path),
+        "file_extension": os.path.splitext(path)[1].lower(),
+        "file_size_bytes": os.path.getsize(path),
+        "source_path": os.path.abspath(path),
+        "ingested_at": datetime.utcnow().isoformat() + "Z"
+    }
+
+    if isinstance(result, list):
+        for r in result:
+            r["file_meta"] = meta
+        return result
+
+    result["file_meta"] = meta
+    return result
+
+
+def empty_result(input_type, page_count=1):
+    return build_result(
+        "",
+        0.0,
+        ["no_text_detected"],
+        {
             "input_type": input_type,
             "page_count": page_count,
             "noise_level": "high",
@@ -337,16 +334,12 @@ def empty_result(input_type, page_count=1):
             "text_density": "low",
             "avg_chars_per_page": 0
         }
-    }
+    )
 
 
 def build_result(text, confidence, warnings, ocr_meta):
-    """
-    Standard successful output.
-    """
-
     return {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "text": text,
         "overall_confidence": confidence,
         "warnings": warnings,
@@ -354,14 +347,24 @@ def build_result(text, confidence, warnings, ocr_meta):
     }
 
 
-# -----------------------------
-# ENTRY POINT
-# -----------------------------
+# ============================================================
+# ENTRY POINT (DRAG & DROP FRIENDLY)
+# ============================================================
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python ocr_local.py <file_path>")
+
+    if len(sys.argv) < 2:
+        print("Drag & drop files or folders into the terminal.")
         sys.exit(1)
 
-    path = sys.argv[1]
-    output = dispatch_file(path)
-    print(json.dumps(output, indent=2))
+    inputs = sys.argv[1:]
+    outputs = []
+
+    for item in inputs:
+        if os.path.isdir(item):
+            for root, _, files in os.walk(item):
+                for f in files:
+                    outputs.append(dispatch_file(os.path.join(root, f)))
+        else:
+            outputs.append(dispatch_file(item))
+
+    print(json.dumps(outputs if len(outputs) > 1 else outputs[0], indent=2))
