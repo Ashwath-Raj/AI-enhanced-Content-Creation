@@ -8,6 +8,7 @@ import time
 import hashlib
 import io
 import difflib
+import html
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -81,6 +82,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- Security Checks ---
+def check_security():
+    # 1. Check for .gitignore
+    if not os.path.exists(".gitignore"):
+        st.error("🚨 SECURITY DISASTER: .gitignore is missing! API keys are at risk.")
+        st.stop()
+    
+    # 2. Check if .env is ignored
+    with open(".gitignore", "r") as f:
+        ignored = f.read()
+        if ".env" not in ignored:
+            st.error("🚨 SECURITY RISK: .env is not in .gitignore. Your keys might be leaked!")
+            st.stop()
+
+check_security()
+
 if not dependencies_installed:
     st.error(f"❌ Missing Dependency: {missing_module}")
     st.warning("Please run: `pip install google-generativeai beautifulsoup4 requests python-dotenv pypdf youtube-transcript-api`")
@@ -137,6 +154,38 @@ def calculate_reading_time(text):
     minutes = words / 200
     return f"{minutes:.1f} min"
 
+
+
+def sanitize_text(text):
+    """Sanitize text to prevent XSS when rendering HTML"""
+    if text is None: return ""
+    return html.escape(str(text))
+
+# --- Ingestion Client ---
+class IngestionClient:
+    BASE_URL = "https://ai-enhanced-content-creation-ocr-api.onrender.com/ingest"
+    
+    def ingest_file(self, file_uploader_obj):
+        try:
+            # Render API expects 'file' in multipart/form-data
+            files = {'file': (file_uploader_obj.name, file_uploader_obj.getvalue(), file_uploader_obj.type)}
+            response = requests.post(self.BASE_URL, files=files, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+    def ingest_url(self, url):
+        try:
+            payload = {"url": url}
+            response = requests.post(self.BASE_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+ingest_client = IngestionClient()
+
 # --- Smart CMS with Git-Like Versioning ---
 CMS_ROOT = "smart_cms_data"
 
@@ -152,7 +201,7 @@ class ContentManager:
 
     def create_project(self, title, folder, content, tags=None, extra_meta=None):
         timestamp = int(time.time())
-        # Clean ID generation
+        if not title: title = "Untitled Project"
         clean_title = "".join([c if c.isalnum() else "_" for c in title])[:30]
         project_id = f"{timestamp}_{clean_title}"
         path = self._get_path(folder, project_id)
@@ -243,6 +292,50 @@ class ContentManager:
 
 cms = ContentManager()
 
+# --- PERSONALIZATION MONITORING ---
+class UserBehaviorTracker:
+    def __init__(self):
+        if 'user_prefs' not in st.session_state:
+            st.session_state['user_prefs'] = {
+                "interactions": 0,
+                "liked_tones": [],
+                "preferred_length": "Medium",
+                "session_start": time.time(),
+                "clicked_projects": set(),
+                "engagement_metrics": { # Simulated External Engagement
+                    "total_likes": 0, 
+                    "top_performing_tone": None 
+                }
+            }
+    
+    def update_engagement(self, likes, tone):
+        # update fake engagement model
+        self.session_state['user_prefs']['engagement_metrics']['total_likes'] += likes
+        if likes > 50: # Threshold for "Good" content
+             self.session_state['user_prefs']['liked_tones'].append(tone)
+    
+    def log_interaction(self, interaction_type, details=None):
+        st.session_state['user_prefs']['interactions'] += 1
+        if interaction_type == "click_project":
+            st.session_state['user_prefs']['clicked_projects'].add(details)
+            
+    def get_metrics(self):
+        duration = time.time() - st.session_state['user_prefs']['session_start']
+        return {
+            "session_duration_min": round(duration / 60, 2),
+            "interactions": st.session_state['user_prefs']['interactions'],
+            "projects_viewed": len(st.session_state['user_prefs']['clicked_projects'])
+        }
+    
+    def update_preference(self, category, value, positive=True):
+        if category == "tone":
+            if positive:
+                st.session_state['user_prefs']['liked_tones'].append(value)
+            elif value in st.session_state['user_prefs']['liked_tones']:
+                st.session_state['user_prefs']['liked_tones'].remove(value)
+
+tracker = UserBehaviorTracker()
+
 # --- UI STATE MANGEMENT ---
 if 'nav_engine' not in st.session_state: st.session_state['nav_engine'] = 'CMS'
 if 'active_project' not in st.session_state: st.session_state['active_project'] = None
@@ -252,7 +345,7 @@ if 'generated_content' not in st.session_state: st.session_state['generated_cont
 with st.sidebar:
     st.title("⚡ Content OS")
     st.markdown("---")
-    engine = st.radio("Core Engine", ["CMS Library", "Creation Engine", "Transformation Engine"], index=1)
+    engine = st.radio("Core Engine", ["CMS Library", "Creation Engine", "Transformation Engine", "Personalization Engine"], index=1)
     st.markdown("---")
     
     with st.expander("📂 Folder Manager", expanded=False):
@@ -269,20 +362,42 @@ with st.sidebar:
             st.caption(", ".join(folders))
             
     with st.expander("📤 Import File to CMS", expanded=False):
-        imp_file = st.file_uploader("Upload Document", type=['txt', 'md', 'pdf'])
+        imp_file = st.file_uploader("Upload Document/Image", type=['txt', 'md', 'pdf', 'png', 'jpg', 'jpeg'])
         imp_folder = st.selectbox("Target Folder", folders or ["General"])
         if imp_file:
             imp_title = st.text_input("Project Title", os.path.splitext(imp_file.name)[0])
             if st.button("Import & Create"):
-                if imp_file.type == "application/pdf":
-                    text = extract_text_from_pdf(imp_file)
-                else:
-                    text = imp_file.getvalue().decode("utf-8")
+                text = ""
+                extra_meta = {}
                 
-                cms.create_project(imp_title, imp_folder, text, tags=["Imported"])
-                st.success(f"Imported '{imp_title}'!")
-                time.sleep(1)
-                st.rerun()
+                # Try API Ingestion first for PDFs/Images
+                if imp_file.type in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']:
+                    with st.spinner("Analyzing document via OCR API..."):
+                        api_res = ingest_client.ingest_file(imp_file)
+                        if "text" in api_res:
+                            text = api_res['text']
+                            extra_meta = api_res.get('ocr_meta', {})
+                            extra_meta['confidence'] = api_res.get('overall_confidence', 0)
+                        else:
+                            st.warning(f"API Ingestion failed, falling back to local: {api_res.get('error')}")
+                
+                # Fallback / Text files
+                if not text:
+                    if imp_file.type == "application/pdf":
+                        text = extract_text_from_pdf(imp_file)
+                    else:
+                        try:
+                            text = imp_file.getvalue().decode("utf-8")
+                        except:
+                            text = "Error: Could not decode text."
+                
+                if text:
+                    cms.create_project(imp_title, imp_folder, text, tags=["Imported", "Ingestion"], extra_meta=extra_meta)
+                    st.success(f"Imported '{imp_title}'!")
+                    if extra_meta.get('confidence'):
+                        st.caption(f"Confidence: {extra_meta['confidence']}")
+                    time.sleep(1)
+                    st.rerun()
 
 # --- WEB BOILERPLATE GENERATOR ---
 def get_web_boilerplate(title, content):
@@ -360,11 +475,11 @@ if engine == "CMS Library":
                     st.markdown(f"""
                     <div class="content-card">
                         <div style="display:flex;justify-content:space-between;align-items:center">
-                            <h4 style="margin:0">{p['title']}</h4>
-                            <span class="badge status-{p['status']}">{p['status']}</span>
+                            <h4 style="margin:0">{sanitize_text(p['title'])}</h4>
+                            <span class="badge status-{sanitize_text(p['status'])}">{sanitize_text(p['status'])}</span>
                         </div>
                         <small style="color:#6b7280; display:block; margin-top:5px;">
-                            📁 {p['folder']} • 🕒 {p['last_modified'][:10]}
+                            📁 {sanitize_text(p['folder'])} • 🕒 {sanitize_text(p['last_modified'][:10])}
                         </small>
                         <div style="margin-top:8px;">
                             <span style="font-size:0.8em; background:#eee; padding:2px 6px; border-radius:4px;">Drafts: {p.get('latest_metrics', {}).get('word_count', 0)} words</span>
@@ -469,9 +584,11 @@ elif engine == "Creation Engine":
             mode = st.selectbox("Content Mode", 
                 ["Blog Post", "Social Media Post", "Video Script", "Newsletter", "Study Notes", "Marketing Copy", "Technical Documentation"])
             
-            src_type = st.radio("Input Source", ["Raw Idea", "Existing Project", "Paste Text", "PDF Upload", "YouTube Video", "URL"])
+            src_type = st.radio("Input Source", ["Raw Idea", "Existing Project", "Paste Text", "Document/Image Upload", "YouTube Video", "URL"])
             
             input_context = ""
+            api_meta_data = None
+            
             if src_type == "Raw Idea":
                 input_context = st.text_area("Ideas / Topics", height=150)
             elif src_type == "Existing Project":
@@ -490,9 +607,27 @@ elif engine == "Creation Engine":
             
             elif src_type == "Paste Text":
                 input_context = st.text_area("Paste Content", height=150)
-            elif src_type == "PDF Upload":
-                f = st.file_uploader("PDF Transcript", type=["pdf"])
-                if f: input_context = extract_text_from_pdf(f)
+            elif src_type == "Document/Image Upload":
+                f = st.file_uploader("Upload (PDF, Images, Text)", type=["pdf", "png", "jpg", "jpeg", "webp", "txt", "md"])
+                if f: 
+                    # Use API if possible
+                    if f.type in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']:
+                         with st.spinner("Processing with Ingestion API..."):
+                             res = ingest_client.ingest_file(f)
+                             if "text" in res:
+                                 input_context = res['text']
+                                 api_meta_data = res.get('ocr_meta', {})
+                                 st.success(f"Ingested! Confidence: {res.get('overall_confidence')}")
+                             else:
+                                 st.error(f"API Error: {res.get('error')}")
+                                 # Fallback logic could go here if user wants, but API is preferred
+                                 if f.type == "application/pdf":
+                                     st.info("Attempting local PDF fallback...")
+                                     input_context = extract_text_from_pdf(f)
+                    else:
+                        # Simple text read
+                        input_context = f.getvalue().decode("utf-8")
+
             elif src_type == "YouTube Video":
                  yt_url = st.text_input("YouTube URL")
                  if yt_url: 
@@ -504,8 +639,17 @@ elif engine == "Creation Engine":
             elif src_type == "URL":
                 u = st.text_input("URL")
                 if u:
-                    try: input_context = BeautifulSoup(requests.get(u).content, 'html.parser').get_text()[:5000]
-                    except: st.error("Bad URL")
+                    with st.spinner("Ingesting URL..."):
+                        # Try API first
+                        res = ingest_client.ingest_url(u)
+                        if "text" in res:
+                             input_context = res['text']
+                             api_meta_data = res.get('ocr_meta', {})
+                             st.success(f"Page Ingested. Noise Level: {api_meta_data.get('noise_level', 'Unknown')}")
+                        else:
+                            st.warning(f"Ingestion API failed ({res.get('error')}). Using basic scraper.")
+                            try: input_context = BeautifulSoup(requests.get(u).content, 'html.parser').get_text()[:5000]
+                            except: st.error("Bad URL - Local scrape failed too.")
 
         # --- CONTROLS ---
         with col2:
@@ -636,3 +780,148 @@ elif engine == "Transformation Engine":
                     extra_meta={"transformation_type": trans_mode}
                 )
                 st.success(f"Saved to project '{meta['title']}' history!")
+
+# ================= PERSONALIZATION ENGINE =================
+elif engine == "Personalization Engine":
+    st.header("🧠 Personalization Engine")
+    
+    # 1. User Behavior Modeling
+    with st.expander("📊 User Behavior & Modeling", expanded=True):
+        metrics = tracker.get_metrics()
+        bmc1, bmc2, bmc3 = st.columns(3)
+        bmc1.metric("Engagement Duration", f"{metrics['session_duration_min']} min")
+        bmc2.metric("Interaction Count", metrics['interactions'])
+        bmc3.metric("Projects Engaged", metrics['projects_viewed'])
+        
+        st.caption("Based on your current session patterns, we are building a preference model.")
+        
+        # Simulated 'Reading Behavior' visualization
+        st.progress(min(metrics['interactions'] * 5, 100), text="Engagement Score")
+
+    st.markdown("---")
+
+    # 2. Dynamic Personalization Workspace
+    st.subheader("🎯 Content Personalization & Smart Editor")
+    
+    # Select Project (CSM File)
+    all_projects = cms.list_all_content()
+    proj_map = {p['title']: p for p in all_projects}
+    
+    col_sel, col_act = st.columns([1, 2])
+    
+    with col_sel:
+        st.markdown("#### Select Source (CSM)")
+        selected_p_title = st.selectbox("Choose Project", list(proj_map.keys()), index=0 if list(proj_map.keys()) else None)
+        
+        if selected_p_title:
+            p_data = proj_map[selected_p_title]
+            tracker.log_interaction("click_project", selected_p_title)
+            
+            # --- AUDIENCE ENGAGEMENT SIMULATOR (New Feature) ---
+            with st.expander("📈 Audience Engagement Data", expanded=False):
+                st.caption("Simulate how this content performed (Mock Data)")
+                sim_likes = st.number_input("Likes/Reactions", min_value=0, step=10, key=f"likes_{p_data['project_id']}")
+                sim_comments = st.number_input("Comments", min_value=0, key=f"comm_{p_data['project_id']}")
+                
+                if st.button("Update Engagement Stats", key=f"upd_{p_data['project_id']}"):
+                     # Update metadata with this 'fake' engagement
+                     current_ver = cms.get_history(p_data['folder'], p_data['project_id'])[0]
+                     extra = current_ver.get('extra_meta', {})
+                     extra['engagement'] = {"likes": sim_likes, "comments": sim_comments}
+                     
+                     cms.commit_version(
+                        p_data['folder'], p_data['project_id'], 
+                        current_ver['content'], 
+                        p_data['title'], 
+                        p_data['tags'], 
+                        current_ver['status'], 
+                        "Updated Engagement Stats", 
+                        extra_meta=extra
+                     )
+                     # Feed into learning model
+                     tracker.update_preference("tone", extra.get('tone', 'Neutral'), positive=sim_likes > 20)
+                     st.toast("Engagement Data Recorded! AI will learn from this.")
+
+            # 3. Learning Feedback Loop Display
+            st.info(f"Detected Tone Preference: {max(set(st.session_state['user_prefs']['liked_tones']), key=st.session_state['user_prefs']['liked_tones'].count) if st.session_state['user_prefs']['liked_tones'] else 'Neutral'}")
+
+            st.markdown("#### ⚡ Quick Actions")
+            if st.button("Summarize for Me"):
+                with st.spinner("Personalizing summary..."):
+                    # Get Engagement Context
+                    hist = cms.get_history(p_data['folder'], p_data['project_id'])[0]
+                    eng_context = hist.get('extra_meta', {}).get('engagement', "No data")
+                    
+                    # Dynamic Personalization
+                    prompt = f"""
+                    Summarize this content.
+                    USER PREFERENCES: {st.session_state['user_prefs']}
+                    PAST ENGAGEMENT ON THIS POST: {eng_context}
+                    
+                    Identify why this post might have performed well/poorly based on the engagement metrics provided.
+                    Content: {hist['content'][:5000]}
+                    """
+                    summary = call_gemini(prompt, "personalization")
+                    st.session_state['pers_output'] = summary
+
+            if st.button("Adapt Tone to My Style"):
+                with st.spinner("Adapting tone..."):
+                    prompt = f"Rewrite this intro to match a professional but engaging tone (User Preference Model). Content: {cms.get_history(p_data['folder'], p_data['project_id'])[0]['content'][:1000]}"
+                    adaptation = call_gemini(prompt, "personalization")
+                    st.session_state['pers_output'] = adaptation
+
+    with col_act:
+        if selected_p_title:
+            # CSM Editor Section (Working on previous CSM file)
+            st.markdown(f"### 📝 Smart Editor: {selected_p_title}")
+            
+            # Load Content
+            current_ver = cms.get_history(p_data['folder'], p_data['project_id'])[0]
+            current_text = current_ver['content']
+            
+            # AI Assist Input
+            ai_instruction = st.text_input("🤖 Ask AI to edit (e.g., 'Make the second paragraph funnier')", key="ai_edit_input")
+            
+            if st.button("Run AI Edit"):
+                if ai_instruction:
+                    with st.spinner("AI is editing..."):
+                        edit_prompt = f"""
+                        TASK: Edit the following text based on the user instruction.
+                        INSTRUCTION: {ai_instruction}
+                        TEXT TO EDIT:
+                        {current_text}
+                        
+                        RETURN ONLY THE UPDATED TEXT.
+                        """
+                        edited_text = call_gemini(edit_prompt, "personalization")
+                        if edited_text:
+                            current_text = edited_text
+                            st.session_state[f'edit_buffer_{p_data["project_id"]}'] = edited_text
+                            st.success("AI Edit Applied! Review below.")
+            
+            # Editor Text Area
+            # distinct key to allow manual override
+            initial_val = st.session_state.get(f'edit_buffer_{p_data["project_id"]}', current_text)
+            new_content = st.text_area("Edit Content", value=initial_val, height=500)
+            
+            # Save Controls
+            if st.button("💾 Save Changes to CSM"):
+                cms.commit_version(p_data['folder'], p_data['project_id'], new_content, p_data['title'], p_data['tags'], "Draft", "Personalized/Smart Edit")
+                st.toast("Changes Saved!")
+                tracker.log_interaction("save_edit")
+                time.sleep(1)
+                st.rerun()
+
+            # Feedback Loop (Learning)
+            if 'pers_output' in st.session_state:
+                 st.markdown("---")
+                 st.markdown("#### AI Suggestion / Output")
+                 st.info(st.session_state['pers_output'])
+                 
+                 fb_col1, fb_col2 = st.columns(2)
+                 if fb_col1.button("👍 Helpful"):
+                     tracker.update_preference("tone", "Professional", True) # Simplified model update
+                     st.toast("Feedback recorded: Preference updated.")
+                 if fb_col2.button("👎 Not Helpful"):
+                     tracker.update_preference("tone", "Professional", False)
+                     st.toast("Feedback recorded: Adjustment noted.")

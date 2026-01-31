@@ -1,7 +1,7 @@
-streamlit
-google-generativeai
-beautifulsoup4
-requests
-python-dotenv
-pypdf
-youtube-transcript-api
+streamlit>=1.30.0
+google-generativeai>=0.3.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+pypdf>=3.17.0
+youtube-transcript-api>=0.6.0

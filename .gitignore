@@ -1,0 +1,4 @@
+.env
+smart_cms_data/
+__pycache__/
+*.pyc

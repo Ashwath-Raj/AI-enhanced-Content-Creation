@@ -1,8 +1,8 @@
 {
-  "current_head": "108d6a23fcc1",
+  "current_head": "b3e74526b068",
   "folder": "General",
   "project_id": "1769841837_blog_post_(general_t",
-  "last_modified": "2026-01-31T12:40:04.856847",
+  "last_modified": "2026-01-31T15:20:33.385819",
   "title": "Blog Post (General Tech) - 12:13",
   "tags": [
     "AI-Gen",
@@ -10,12 +10,14 @@
     "LinkedIn",
     "A/B Testing",
     "Blog Post from Video/Notes",
+    "Transformed",
+    "Social Media Thread",
     "Transformed"
   ],
   "status": "Draft",
   "latest_metrics": {
-    "word_count": 947,
-    "char_count": 6871,
-    "read_time": "4.7 min"
+    "word_count": 490,
+    "char_count": 3469,
+    "read_time": "2.5 min"
   }
 }
