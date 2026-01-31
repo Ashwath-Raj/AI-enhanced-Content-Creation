@@ -103,193 +103,20 @@ if not dependencies_installed:
     st.warning("Please run: `pip install google-generativeai beautifulsoup4 requests python-dotenv pypdf youtube-transcript-api`")
     st.stop()
 
-# --- Helpers ---
-def get_api_key(task_type):
-    key_map = {
-        "creation": "GEMINI_API_KEY_CREATION",
-        "transformation": "GEMINI_API_KEY_TRANSFORMATION",
-        "cms": "GEMINI_API_KEY_CMS",
-        "personalization": "GEMINI_API_KEY_PERSONALIZATION"
-    }
-    env_var = key_map.get(task_type)
-    key = os.getenv(env_var)
-    if not key or "YOUR_API_KEY" in key:
-        key = os.getenv("GEMINI_API_KEY")
-    return key.strip() if key else None
+from core import (
+    call_gemini, generate_hash, extract_text_from_pdf, 
+    calculate_reading_time, sanitize_text, IngestionClient, 
+    ContentManager, CMS_ROOT, get_youtube_transcript
+)
 
-def call_gemini(prompt, task_type, model_name='gemini-2.5-flash'):
-    api_key = get_api_key(task_type)
-    if not api_key:
-        st.error(f"⚠️ API Key for '{task_type}' is missing.")
+def st_call_gemini(prompt, task_type, model_name='gemini-2.5-flash'):
+    res = call_gemini(prompt, task_type, model_name)
+    if res and (res.startswith("AI Error") or res.startswith("Error")):
+        st.error(res)
         return None
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name)
-    try:
-        return model.generate_content(prompt).text
-    except Exception as e:
-        st.error(f"AI Error: {e}")
-        return None
-
-def generate_hash(content):
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
-
-def extract_text_from_pdf(file):
-    try:
-        pdf = PdfReader(file)
-        text = ""
-        for page in pdf.pages:
-            text += page.extract_text()
-        return text
-    except Exception as e: return f"Error reading PDF: {e}"
-
-def get_youtube_transcript(url):
-    try:
-        video_id = url.split("v=")[1].split("&")[0]
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([t['text'] for t in transcript])
-    except Exception as e: return f"Error fetching YouTube transcript: {e}"
-
-def calculate_reading_time(text):
-    words = len(text.split())
-    minutes = words / 200
-    return f"{minutes:.1f} min"
-
-
-
-def sanitize_text(text):
-    """Sanitize text to prevent XSS when rendering HTML"""
-    if text is None: return ""
-    return html.escape(str(text))
-
-# --- Ingestion Client ---
-class IngestionClient:
-    BASE_URL = "https://ai-enhanced-content-creation-ocr-api.onrender.com/ingest"
-    
-    def ingest_file(self, file_uploader_obj):
-        try:
-            # Render API expects 'file' in multipart/form-data
-            files = {'file': (file_uploader_obj.name, file_uploader_obj.getvalue(), file_uploader_obj.type)}
-            response = requests.post(self.BASE_URL, files=files, timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
-
-    def ingest_url(self, url):
-        try:
-            payload = {"url": url}
-            response = requests.post(self.BASE_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"error": str(e)}
+    return res
 
 ingest_client = IngestionClient()
-
-# --- Smart CMS with Git-Like Versioning ---
-CMS_ROOT = "smart_cms_data"
-
-class ContentManager:
-    LIFECYCLE_STAGES = ["Idea", "Draft", "Review", "Approval", "Publication", "Archival"]
-    
-    def __init__(self):
-        if not os.path.exists(CMS_ROOT):
-            os.makedirs(CMS_ROOT)
-            
-    def _get_path(self, folder, project_id):
-        return os.path.join(CMS_ROOT, folder, project_id)
-
-    def create_project(self, title, folder, content, tags=None, extra_meta=None):
-        timestamp = int(time.time())
-        if not title: title = "Untitled Project"
-        clean_title = "".join([c if c.isalnum() else "_" for c in title])[:30]
-        project_id = f"{timestamp}_{clean_title}"
-        path = self._get_path(folder, project_id)
-        
-        if not os.path.exists(path):
-            os.makedirs(path)
-            
-        # Initial Commit
-        self.commit_version(folder, project_id, content, title, tags or [], "Idea", "Initial commit", extra_meta)
-        return project_id
-
-    def commit_version(self, folder, project_id, content, title, tags, status, message="Update", extra_meta=None):
-        path = self._get_path(folder, project_id)
-        timestamp = datetime.datetime.now().isoformat()
-        content_hash = generate_hash(content + timestamp)
-        
-        # Enhanced Metadata
-        word_count = len(content.split())
-        char_count = len(content)
-        read_time = calculate_reading_time(content)
-        
-        version_data = {
-            "version_id": content_hash,
-            "timestamp": timestamp,
-            "title": title,
-            "content": content,
-            "tags": tags,
-            "status": status,
-            "message": message,
-            "metrics": {
-                "word_count": word_count,
-                "char_count": char_count,
-                "read_time": read_time
-            },
-            "extra_meta": extra_meta or {}
-        }
-        
-        # Save Version File
-        with open(os.path.join(path, f"v_{content_hash}.json"), "w") as f:
-            json.dump(version_data, f, indent=2)
-            
-        # Update HEAD (Meta file)
-        meta = {
-            "current_head": content_hash,
-            "folder": folder,
-            "project_id": project_id,
-            "last_modified": timestamp,
-            "title": title, 
-            "tags": tags,
-            "status": status,
-            "latest_metrics": version_data['metrics']
-        }
-        with open(os.path.join(path, "meta.json"), "w") as f:
-            json.dump(meta, f, indent=2)
-            
-        return content_hash
-
-    def get_meta(self, folder, project_id):
-        try:
-            with open(os.path.join(self._get_path(folder, project_id), "meta.json"), "r") as f:
-                return json.load(f)
-        except: return None
-
-    def get_history(self, folder, project_id):
-        path = self._get_path(folder, project_id)
-        files = glob.glob(os.path.join(path, "v_*.json"))
-        history = []
-        for f in files:
-            with open(f, "r") as r:
-                history.append(json.load(r))
-        return sorted(history, key=lambda x: x['timestamp'], reverse=True)
-
-    def list_all_content(self):
-        projects = []
-        for folder_path in glob.glob(os.path.join(CMS_ROOT, "*")):
-            if os.path.isdir(folder_path):
-                folder_name = os.path.basename(folder_path)
-                for proj_path in glob.glob(os.path.join(folder_path, "*")):
-                    if os.path.isdir(proj_path):
-                        proj_id = os.path.basename(proj_path)
-                        meta = self.get_meta(folder_name, proj_id)
-                        if meta:
-                            projects.append(meta)
-        return sorted(projects, key=lambda x: x['last_modified'], reverse=True)
-    
-    def get_folders(self):
-        return [d for d in os.listdir(CMS_ROOT) if os.path.isdir(os.path.join(CMS_ROOT, d))]
-
 cms = ContentManager()
 
 # --- PERSONALIZATION MONITORING ---
@@ -373,7 +200,7 @@ with st.sidebar:
                 # Try API Ingestion first for PDFs/Images
                 if imp_file.type in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']:
                     with st.spinner("Analyzing document via OCR API..."):
-                        api_res = ingest_client.ingest_file(imp_file)
+                        api_res = ingest_client.ingest_file(imp_file.name, imp_file.getvalue(), imp_file.type)
                         if "text" in api_res:
                             text = api_res['text']
                             extra_meta = api_res.get('ocr_meta', {})
@@ -613,7 +440,7 @@ elif engine == "Creation Engine":
                     # Use API if possible
                     if f.type in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp']:
                          with st.spinner("Processing with Ingestion API..."):
-                             res = ingest_client.ingest_file(f)
+                             res = ingest_client.ingest_file(f.name, f.getvalue(), f.type)
                              if "text" in res:
                                  input_context = res['text']
                                  api_meta_data = res.get('ocr_meta', {})
@@ -692,7 +519,7 @@ elif engine == "Creation Engine":
                     - { "Explain complex concepts using simple analogies" if adv_analogy else "" }
                     """
                     
-                    result = call_gemini(prompt, "creation")
+                    result = st_call_gemini(prompt, "creation")
                     if result:
                         st.session_state['generated_content'] = result
                         
@@ -755,7 +582,7 @@ elif engine == "Transformation Engine":
                 
                 Keep the core meaning but adapt strictly to the new format.
                 """
-                res = call_gemini(prompt, "transformation")
+                res = st_call_gemini(prompt, "transformation")
                 st.session_state['transform_result'] = res
     
     if 'transform_result' in st.session_state and st.session_state['transform_result']:
@@ -861,13 +688,13 @@ elif engine == "Personalization Engine":
                     Identify why this post might have performed well/poorly based on the engagement metrics provided.
                     Content: {hist['content'][:5000]}
                     """
-                    summary = call_gemini(prompt, "personalization")
+                    summary = st_call_gemini(prompt, "personalization")
                     st.session_state['pers_output'] = summary
 
             if st.button("Adapt Tone to My Style"):
                 with st.spinner("Adapting tone..."):
                     prompt = f"Rewrite this intro to match a professional but engaging tone (User Preference Model). Content: {cms.get_history(p_data['folder'], p_data['project_id'])[0]['content'][:1000]}"
-                    adaptation = call_gemini(prompt, "personalization")
+                    adaptation = st_call_gemini(prompt, "personalization")
                     st.session_state['pers_output'] = adaptation
 
     with col_act:
@@ -893,7 +720,7 @@ elif engine == "Personalization Engine":
                         
                         RETURN ONLY THE UPDATED TEXT.
                         """
-                        edited_text = call_gemini(edit_prompt, "personalization")
+                        edited_text = st_call_gemini(edit_prompt, "personalization")
                         if edited_text:
                             current_text = edited_text
                             st.session_state[f'edit_buffer_{p_data["project_id"]}'] = edited_text
