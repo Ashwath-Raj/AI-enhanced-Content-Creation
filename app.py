@@ -330,9 +330,9 @@ if engine == "CMS Library":
                 st.markdown(f"""
                 <div class="meta-box">
                     <b>📊 Metadata</b><br>
-                    Words: {view_version['metrics'].get('word_count', 0)} | 
-                    Chars: {view_version['metrics'].get('char_count', 0)} | 
-                    Reading Time: {view_version['metrics'].get('read_time', '0 min')} <br>
+                    Words: {view_version.get('metrics', {}).get('word_count', 0)} | 
+                    Chars: {view_version.get('metrics', {}).get('char_count', 0)} | 
+                    Reading Time: {view_version.get('metrics', {}).get('read_time', '0 min')} <br>
                     <i>Generated Info: {view_version.get('extra_meta', {}).get('mode', 'Manual Edit')}</i>
                 </div>
                 """, unsafe_allow_html=True)
