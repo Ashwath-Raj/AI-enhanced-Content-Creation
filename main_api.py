@@ -3,9 +3,15 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uvicorn
 import os
-from core import call_gemini, ContentManager, IngestionClient, CMS_ROOT
+from core import call_gemini, ContentManager, IngestionClient, CMS_ROOT, check_env_security
 
 app = FastAPI(title="Content OS API", version="4.0")
+
+# Security Check on Startup
+sec_ok, sec_msg = check_env_security()
+if not sec_ok:
+    print(sec_msg)
+    # Don't exit here to allow dev to see docs, but endpoints will fail if keys are missing
 cms = ContentManager()
 ingest_client = IngestionClient()
 

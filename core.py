@@ -15,6 +15,18 @@ load_dotenv(override=True)
 
 CMS_ROOT = "smart_cms_data"
 
+def check_env_security():
+    """Environment and API Key security verification."""
+    if not os.path.exists(".env"):
+        return False, "❌ .env file missing! Create one based on .env.example"
+    
+    # Check for placeholder keys
+    key = os.getenv("GEMINI_API_KEY")
+    if not key or "YOUR_API_KEY" in key or len(key) < 10:
+        return False, "⚠️ Invalid or placeholder GEMINI_API_KEY found in .env"
+        
+    return True, "✅ Security checks passed."
+
 def get_api_key(task_type):
     key_map = {
         "creation": "GEMINI_API_KEY_CREATION",

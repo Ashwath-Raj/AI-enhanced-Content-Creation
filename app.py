@@ -98,16 +98,20 @@ def check_security():
 
 check_security()
 
-if not dependencies_installed:
-    st.error(f"❌ Missing Dependency: {missing_module}")
-    st.warning("Please run: `pip install google-generativeai beautifulsoup4 requests python-dotenv pypdf youtube-transcript-api`")
-    st.stop()
-
 from core import (
     call_gemini, generate_hash, extract_text_from_pdf, 
     calculate_reading_time, sanitize_text, IngestionClient, 
-    ContentManager, CMS_ROOT, get_youtube_transcript
+    ContentManager, CMS_ROOT, get_youtube_transcript,
+    check_env_security
 )
+
+# 3. Check API Key
+sec_ok, sec_msg = check_env_security()
+if not sec_ok:
+    st.error(sec_msg)
+    st.info("Please update your `.env` file with a valid Google Gemini API key.")
+    st.stop()
+
 
 def st_call_gemini(prompt, task_type, model_name='gemini-2.5-flash'):
     res = call_gemini(prompt, task_type, model_name)
