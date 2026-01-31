@@ -7,6 +7,7 @@ import datetime
 import time
 import hashlib
 import io
+import difflib
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -25,7 +26,7 @@ except ImportError as e:
 
 # --- Configuration & Setup ---
 st.set_page_config(
-    page_title="Content OS",
+    page_title="Content OS v3.0",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -61,12 +62,10 @@ st.markdown("""
     .status-Idea { background-color: #e0f2fe; color: #0369a1; }
     .status-Draft { background-color: #fef9c3; color: #854d0e; }
     .status-Review { background-color: #f3e8ff; color: #6b21a8; }
-    .status-Published { background-color: #dcfce7; color: #15803d; }
-    .status-Archived { background-color: #f3f4f6; color: #374151; }
+    .status-Approval { background-color: #cffafe; color: #0e7490; }
+    .status-Publication { background-color: #dcfce7; color: #15803d; }
+    .status-Archival { background-color: #f3f4f6; color: #374151; }
     
-    /* Tree View mockup */
-    .tree-item { padding: 4px 8px; cursor: pointer; border-radius: 4px; }
-    .tree-item:hover { background-color: #f3f4f6; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -143,8 +142,6 @@ class ContentManager:
     def commit_version(self, folder, project_id, content, title, tags, status, message="Update"):
         path = self._get_path(folder, project_id)
         timestamp = datetime.datetime.now().isoformat()
-        
-        # Calculate Hash
         content_hash = generate_hash(content + timestamp)
         
         version_data = {
@@ -157,17 +154,15 @@ class ContentManager:
             "message": message
         }
         
-        # Save Version File
         with open(os.path.join(path, f"v_{content_hash}.json"), "w") as f:
             json.dump(version_data, f, indent=2)
             
-        # Update HEAD (Meta file)
         meta = {
             "current_head": content_hash,
             "folder": folder,
             "project_id": project_id,
             "last_modified": timestamp,
-            "title": title, # Keep current title in meta for easy indexing
+            "title": title, 
             "tags": tags,
             "status": status
         }
@@ -182,12 +177,6 @@ class ContentManager:
                 return json.load(f)
         except: return None
 
-    def get_version(self, folder, project_id, version_hash):
-        try:
-            with open(os.path.join(self._get_path(folder, project_id), f"v_{version_hash}.json"), "r") as f:
-                return json.load(f)
-        except: return None
-
     def get_history(self, folder, project_id):
         path = self._get_path(folder, project_id)
         files = glob.glob(os.path.join(path, "v_*.json"))
@@ -198,7 +187,6 @@ class ContentManager:
         return sorted(history, key=lambda x: x['timestamp'], reverse=True)
 
     def list_all_content(self):
-        # Scan all folders
         projects = []
         for folder_path in glob.glob(os.path.join(CMS_ROOT, "*")):
             if os.path.isdir(folder_path):
@@ -219,63 +207,52 @@ cms = ContentManager()
 # --- UI STATE MANGEMENT ---
 if 'nav_engine' not in st.session_state: st.session_state['nav_engine'] = 'CMS'
 if 'active_project' not in st.session_state: st.session_state['active_project'] = None
+if 'generated_content' not in st.session_state: st.session_state['generated_content'] = ""
 
 # --- SIDEBAR NAV ---
 with st.sidebar:
     st.title("⚡ Content OS")
     st.markdown("---")
-    
-    # Engine Selector
     engine = st.radio("Select Engine", ["CMS Library", "Creation Engine", "Transformation Engine"], index=0)
-    
     st.markdown("---")
     st.markdown("#### 📁 Quick Folders")
-    
-    # Simple Folder Creator
     new_folder = st.text_input("New Folder Name", placeholder="e.g. BlogPosts")
     if st.button("Create Folder") and new_folder:
         os.makedirs(os.path.join(CMS_ROOT, new_folder), exist_ok=True)
         st.success(f"Created {new_folder}")
         st.rerun()
-        
-    # List Folders
     folders = cms.get_folders()
-    if not folders:
-        st.caption("No folders yet.")
     for f in folders:
         st.markdown(f"📂 **{f}**")
 
-# --- MAIN ENGINE VIEWS ---
-
 # ================= CMS LIBRARY VIEW =================
 if engine == "CMS Library":
-    st.header("📂 Content Library")
+    st.header("📂 Content Library & Smart CMS")
+    
+    # Filter
+    search_col, sort_col = st.columns([3, 1])
+    search_q = search_col.text_input("🔍 Semantic Search (Topic/Tags)", placeholder="Search by meaning...")
     
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        # Search & Filter
-        search_q = st.text_input("🔍 Semantic Search", placeholder="Search by concept...")
-        # (For now simple text search, could upgrade to embedding search later)
-        
         st.markdown("### Projects")
         projects = cms.list_all_content()
         
         for p in projects:
             if search_q.lower() in p['title'].lower() or search_q.lower() in str(p['tags']).lower():
                 with st.container():
-                    # Card
                     st.markdown(f"""
                     <div class="content-card">
                         <div style="display:flex;justify-content:space-between;align-items:center">
                             <h4>{p['title']}</h4>
                             <span class="badge status-{p['status']}">{p['status']}</span>
                         </div>
-                        <small style="color:#6b7280">{p['folder']} • Last mod: {p['last_modified'][:10]}</small>
+                        <small style="color:#6b7280">{p['folder']} • {p['last_modified'][:10]}</small>
+                        <br><small>Tags: {", ".join(p.get('tags', []))}</small>
                     </div>
                     """, unsafe_allow_html=True)
-                    
-                    if st.button("Open Editor", key=f"btn_{p['project_id']}"):
+                    if st.button("Open", key=f"btn_{p['project_id']}"):
                         st.session_state['active_project'] = p
                         st.rerun()
 
@@ -285,146 +262,168 @@ if engine == "CMS Library":
             folder = active_meta['folder']
             pid = active_meta['project_id']
             
-            # Fetch History
             history = cms.get_history(folder, pid)
             latest_version = history[0]
             
-            # --- EDITOR HEADER ---
             st.subheader(f"✏️ {latest_version['title']}")
             
-            # Meta Controls
+            # --- LIFECYCLE & COMPARISON ---
             c1, c2, c3 = st.columns(3)
-            new_status = c1.selectbox("Lifecycle Status", ContentManager.LIFECYCLE_STAGES, index=ContentManager.LIFECYCLE_STAGES.index(latest_version['status']))
+            new_status = c1.selectbox("Status", ContentManager.LIFECYCLE_STAGES, index=ContentManager.LIFECYCLE_STAGES.index(latest_version['status']))
             
-            # Version Control Dropdown
-            version_options = {f"{v['timestamp'][:16]} - {v['message']} ({v['version_id'][:6]})": v for v in history}
-            selected_v_key = c2.selectbox("History / Versions", list(version_options.keys()), index=0)
+            version_options = {f"{v['timestamp'][:16]} ({v['version_id'][:6]})": v for v in history}
+            selected_v_key = c2.selectbox("Current View", list(version_options.keys()), index=0)
             view_version = version_options[selected_v_key]
             
-            c3.markdown(f"**Current View:** `{view_version['version_id'][:8]}`")
+            # Compare with previous
+            compare_v_key = c3.selectbox("Compare With", ["None"] + list(version_options.keys()), index=0)
             
-            # Diff Check Logic could go here
+            # --- DIFF VIEW LOGIC ---
+            if compare_v_key != "None":
+                compare_version = version_options[compare_v_key]
+                diff = difflib.unified_diff(
+                    compare_version['content'].splitlines(),
+                    view_version['content'].splitlines(),
+                    fromfile=f"Version {compare_version['version_id'][:6]}",
+                    tofile=f"Version {view_version['version_id'][:6]}",
+                    lineterm=''
+                )
+                st.markdown("#### 🔍 Change Comparison")
+                st.code("\n".join(diff), language="diff")
             
-            # --- CONTENT EDITOR ---
+            # --- EDITOR ---
             edit_content = st.text_area("Content Body", view_version['content'], height=500)
+            edit_tags = st.text_input("Tags", ", ".join(view_version.get('tags', [])))
             
-            # Tags
-            current_tags = ", ".join(view_version['tags'])
-            edit_tags = st.text_input("Tags (comma separated)", current_tags)
-            
-            # --- SAVE ACTIONS ---
-            sc1, sc2 = st.columns([1, 1])
-            commit_msg = sc1.text_input("Commit Message", placeholder="What did you change?")
-            
-            if sc2.button("💾 Commit New Version"):
-                if not commit_msg:
-                    st.error("Please enter a commit message.")
-                else:
-                    tag_list = [t.strip() for t in edit_tags.split(",") if t.strip()]
-                    cms.commit_version(folder, pid, edit_content, active_meta['title'], tag_list, new_status, commit_msg)
-                    st.success("Committed successfully!")
-                    time.sleep(1)
-                    st.rerun()
-            
-            st.divider()
-            if st.button("🤖 AI Analysis & Suggestions", type="secondary"):
-                with st.spinner("Analyzing semantics..."):
-                    prompt = f"Analyze this content for tone, clarity, and SEO improvements:\n\n{edit_content}"
-                    rem = call_gemini(prompt, "cms")
-                    st.info(rem)
-
-        else:
-            st.info("👈 Select a project from the list to edit.")
+            # --- ACTIONS ---
+            sc1, sc2 = st.columns([2, 1])
+            commit_msg = sc1.text_input("Commit Message", placeholder="Update details...")
+            if sc2.button("💾 Save & Commit"):
+                tag_list = [t.strip() for t in edit_tags.split(",") if t.strip()]
+                cms.commit_version(folder, pid, edit_content, active_meta['title'], tag_list, new_status, commit_msg or "Update")
+                st.success("Committed!")
+                time.sleep(1)
+                st.rerun()
 
 # ================= CREATION ENGINE =================
 elif engine == "Creation Engine":
-    st.header("🎨 AI Content Creation")
+    st.header("🎨 AI Content Creation Engine")
     
     with st.container():
         st.markdown('<div class="content-card">', unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         
-        # INPUT SOURCE
+        # --- INPUTS ---
         with col1:
-            st.subheader("1. Input Source")
-            src_type = st.radio("Source Type", ["Raw Topic/Idea", "Text Paste", "PDF Upload", "URL"])
+            st.subheader("1. Source & Mode")
+            mode = st.selectbox("Content Mode", 
+                ["Blog Post", "Social Media Post", "Video Script", "Newsletter", "Study Notes", "Marketing Copy", "Technical Documentation"])
+            
+            src_type = st.radio("Input Source", ["Raw Idea", "Paste Text", "PDF Upload", "URL"])
             
             input_context = ""
-            if src_type == "Raw Topic/Idea":
-                input_context = st.text_area("Enter your topic/idea", height=150)
-            elif src_type == "Text Paste":
-                input_context = st.text_area("Paste existing text", height=150)
+            if src_type == "Raw Idea":
+                input_context = st.text_area("Ideas / Topics", height=150)
+            elif src_type == "Paste Text":
+                input_context = st.text_area("Paste Content", height=150)
             elif src_type == "PDF Upload":
-                f = st.file_uploader("Upload PDF Transcript", type=["pdf"])
-                if f:
-                    txt = extract_text_from_pdf(f)
-                    st.caption(f"Extracted {len(txt)} chars")
-                    input_context = txt
+                f = st.file_uploader("PDF Transcript", type=["pdf"])
+                if f: input_context = extract_text_from_pdf(f)
             elif src_type == "URL":
                 u = st.text_input("URL")
                 if u:
-                    try:
-                        input_context = BeautifulSoup(requests.get(u).content, 'html.parser').get_text()[:5000] # Limit char count
-                        st.caption("Extracted text from URL")
-                    except: st.error("Invalid URL")
+                    try: input_context = BeautifulSoup(requests.get(u).content, 'html.parser').get_text()[:5000]
+                    except: st.error("Bad URL")
 
-        # CONFIG
+        # --- CONTROLS ---
         with col2:
-            st.subheader("2. Generation Config")
-            out_format = st.selectbox("Output Format", ["Blog Post", "Social Thread", "Executive Summary", "Study Notes"])
+            st.subheader("2. Generation Controls")
+            audience = st.text_input("Target Audience", "General Tech")
             tone = st.select_slider("Tone", ["Informal", "Casual", "Professional", "Academic", "Expert"])
-            audience = st.text_input("Target Audience", "General Audience")
+            length = st.select_slider("Length", ["Short", "Medium", "Long", "Deep Dive"])
+            depth = st.select_slider("Explanation Depth", ["Basic", "Intermediate", "Advanced", "Expert"])
+            platform = st.selectbox("Platform Format", ["Generic", "LinkedIn", "Twitter/X", "Medium", "Substack", "GitHub README"])
+            
+            st.markdown("### Advanced")
+            adv_ab = st.checkbox("Generate A/B Variants")
+            adv_human = st.checkbox("Human-like Rewriting")
+            adv_analogy = st.checkbox("Use Analogies")
             
             save_folder = st.selectbox("Save to Folder", cms.get_folders() or ["General"])
 
-        generate_btn = st.button("✨ Generate & Draft", use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    if generate_btn and input_context:
-        with st.spinner("Generating content..."):
-            prompt = f"""
-            TASK: Create a {out_format}.
-            SOURCE: {input_context[:10000]}
-            AUDIENCE: {audience}
-            TONE: {tone}
-            
-            Output should be formatted in Markdown.
-            """
-            result = call_gemini(prompt, "creation")
-            
-            if result:
-                st.subheader("Result")
-                st.markdown(result)
+        if st.button("✨ Generate Content", use_container_width=True):
+            with st.spinner("Compiling high-quality content..."):
+                prompt = f"""
+                ACT AS: Expert Content Creator.
+                TASK: Write a {mode}.
+                SOURCE MATERIAL: {input_context[:15000]}
                 
-                # Auto-save to CMS
-                title = f"{out_format} - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                if save_folder == "General" and not os.path.exists(os.path.join(CMS_ROOT, "General")):
-                     os.makedirs(os.path.join(CMS_ROOT, "General"))
-                     
-                pid = cms.create_project(title, save_folder, result, tags=["AI-Generated", out_format])
-                st.success(f"Saved to CMS as '{title}' in {save_folder}")
+                TARGET AUDIENCE: {audience}
+                TONE: {tone}
+                LENGTH: {length}
+                DEPTH: {depth}
+                PLATFORM: {platform}
+                
+                ADVANCED INSTRUCTIONS:
+                - { "Create 2 distinct variants (Option A and Option B)" if adv_ab else "Single high-quality version" }
+                - { "Use natural, human-like phrasing (avoid AI cliches)" if adv_human else "" }
+                - { "Explain complex concepts using simple analogies" if adv_analogy else "" }
+                """
+                
+                result = call_gemini(prompt, "creation")
+                if result:
+                    st.session_state['generated_content'] = result
+                    
+                    # Auto-Tagging
+                    tags = ["AI-Gen", mode, platform]
+                    if adv_ab: tags.append("A/B Testing")
+                    
+                    # Save
+                    title = f"{mode} ({audience}) - {datetime.datetime.now().strftime('%H:%M')}"
+                    if save_folder == "General" and not os.path.exists(os.path.join(CMS_ROOT, "General")):
+                        os.makedirs(os.path.join(CMS_ROOT, "General"))
+                    
+                    cms.create_project(title, save_folder, result, tags)
+                    st.success(f"Generated & Saved to '{save_folder}'!")
+
+    if st.session_state['generated_content']:
+        st.markdown("### Result")
+        st.markdown(st.session_state['generated_content'])
 
 # ================= TRANSFORMATION ENGINE =================
 elif engine == "Transformation Engine":
-    st.header("🔄 Content Transformation")
-    st.info("Convert existing content into new formats (One-to-Many).")
+    st.header("🔄 Content Transformation Engine")
     
-    # Select from CMS
     projects = cms.list_all_content()
     opts = {p['title']: p for p in projects}
-    
-    sel_proj = st.selectbox("Select Project to Transform", list(opts.keys()) if opts else [])
+    sel_proj = st.selectbox("Select Content to Transform", list(opts.keys()) if opts else [])
     
     if sel_proj:
         meta = opts[sel_proj]
-        # Get latest content
         current = cms.get_history(meta['folder'], meta['project_id'])[0]['content']
+        st.text_area("Source", current, height=150, disabled=True)
         
-        st.text_area("Source Content", current, height=150, disabled=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("One-to-Many Conversion")
+            trans_mode = st.selectbox("Convert To", 
+                ["Social Media Thread", "Blog Post from Video/Notes", "Quiz/Flashcards", "Executive Summary"])
+                
+        with col2:
+            st.subheader("Semantic Refinement")
+            sem_mode = st.selectbox("Refinement Type", 
+                ["Simplify (EL15)", "Expand/Elaborate", "Reframe (New Perspective)", "Counter-Argument Gen", "Tone Adjustment"])
         
-        target_format = st.selectbox("Transform To", ["Twitter/X Thread", "LinkedIn Post", "Quiz Questions", "Analogy Explanation"])
-        
-        if st.button("Run Transformation"):
+        if st.button("🚀 Run Transformation"):
             with st.spinner("Transforming..."):
-                res = call_gemini(f"Transform this into a {target_format}:\n\n{current}", "transformation")
+                prompt = f"""
+                TASK: Content Transformation
+                SOURCE: {current[:15000]}
+                
+                PRIMARY GOAL: Convert to {trans_mode}
+                SECONDARY REFINEMENT: {sem_mode}
+                
+                Keep the core meaning but adapt strictly to the new format.
+                """
+                res = call_gemini(prompt, "transformation")
                 st.markdown(res)
