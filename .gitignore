@@ -1,0 +1,10 @@
+.env
+*.pyc
+*.pyo
+*.pyd
+*.db
+__pycache__
+venv/
+
+# Ignore PostgreSQL data directory
+postgres_data/
