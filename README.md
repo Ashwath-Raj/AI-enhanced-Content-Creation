@@ -74,4 +74,5 @@ python main_api.py
 - Input sanitization is applied to prevent XSS in rendered views.
 
 ---
-Built with ❤️ by [Ashwath-Raj](https://github.com/Ashwath-Raj)
+
+Built with AI by [Ashwath-Raj](https://github.com/Ashwath-Raj)
